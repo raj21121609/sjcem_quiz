@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@theme {
+  --color-sjcem-navy: #00386B;
+  --color-sjcem-blue: #005599;
+  --color-sjcem-bg: #F5F7F9;
+  --color-sjcem-border: #D9E1E8;
+  --color-sjcem-text: #1C1C1C;
+  --color-sjcem-muted: #5F6B76;
+  --color-sjcem-red: #E31B23;
+  --color-sjcem-green: #449284;
+}
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    --font-heading: 'Plus Jakarta Sans', var(--font-sans);
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #F5F7F9;
+    color: #1C1C1C;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+    letter-spacing: -0.015em;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #F5F7F9;
+}
+::-webkit-scrollbar-thumb {
+  background: #D9E1E8;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #5F6B76;
+}
+
+/* Print styling */
+@media print {
+  header, footer, .no-print {
+    display: none !important;
+  }
+  body {
+    background: #ffffff !important;
+  }
+}

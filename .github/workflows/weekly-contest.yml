@@ -1,0 +1,180 @@
+﻿# ============================================================
+# SJCEM Quiz — Weekly Contest Automation
+# ============================================================
+#
+# Schedule: Every Sunday at 10:00 AM IST (UTC+5:30) = 04:30 UTC.
+#
+# What it does:
+#   1. Calculates next Monday date as week_start (YYYY-MM-DD).
+#   2. POSTs to the Supabase generate-contest Edge Function using
+#      the AUTOMATION_SECRET stored in GitHub Actions secrets.
+#   3. If a contest for that week already exists (HTTP 409), exits
+#      successfully with a skip message — never overwrites.
+#   4. On success, the contest is saved as status=draft.
+#      It is NEVER automatically activated.
+#
+# Required GitHub Actions secrets (Settings > Secrets > Actions):
+#   SUPABASE_FUNCTION_URL  full URL, e.g.
+#     https://<project-ref>.supabase.co/functions/v1/generate-contest
+#   AUTOMATION_SECRET      random >=32-char secret (same value set in Supabase)
+#
+# No Gemini API key, service-role key, or JWT is stored here.
+# ============================================================
+
+name: Weekly Contest Generator
+
+on:
+  schedule:
+    # 04:30 UTC on Sunday = 10:00 AM IST (UTC+5:30)
+    - cron: "30 4 * * 0"
+
+  workflow_dispatch:
+    inputs:
+      week_start_override:
+        description: >
+          Override week_start date (YYYY-MM-DD).
+          Leave blank to auto-calculate next Monday.
+        required: false
+        default: ""
+      theme:
+        description: "Optional theme hint for Gemini question generation"
+        required: false
+        default: ""
+
+jobs:
+  generate-contest:
+    name: Generate Weekly Draft Contest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # --------------------------------------------------------
+      # Step 1: Calculate week_start (next Monday from Sunday)
+      # --------------------------------------------------------
+      - name: Calculate week_start date
+        id: date
+        shell: bash
+        run: |
+          OVERRIDE="${{ github.event.inputs.week_start_override }}"
+          if [[ -n "$OVERRIDE" ]]; then
+            WEEK_START="$OVERRIDE"
+            echo "Using manual override: $WEEK_START"
+          else
+            # Workflow runs on Sunday; next Monday is +1 day
+            TODAY=$(date -u +%u)   # 1=Mon ... 7=Sun
+            if [[ "$TODAY" -eq 7 ]]; then
+              DAYS_AHEAD=1
+            elif [[ "$TODAY" -eq 1 ]]; then
+              DAYS_AHEAD=7
+            else
+              DAYS_AHEAD=$(( 8 - TODAY ))
+            fi
+            WEEK_START=$(date -u -d "+${DAYS_AHEAD} days" +%Y-%m-%d)
+            echo "Calculated next Monday: $WEEK_START (today day-of-week=$TODAY)"
+          fi
+          echo "week_start=$WEEK_START" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------------
+      # Step 2: Build JSON request body
+      # --------------------------------------------------------
+      - name: Build request body
+        id: body
+        shell: bash
+        run: |
+          THEME="${{ github.event.inputs.theme }}"
+          WEEK_START="${{ steps.date.outputs.week_start }}"
+          if [[ -n "$THEME" ]]; then
+            BODY=$(jq -n --arg ws "$WEEK_START" --arg th "$THEME" \
+              '{"week_start":$ws,"theme":$th}')
+          else
+            BODY=$(jq -n --arg ws "$WEEK_START" '{"week_start":$ws}')
+          fi
+          echo "body=$BODY" >> "$GITHUB_OUTPUT"
+          echo "Request body ready (week_start=$WEEK_START)"
+
+      # --------------------------------------------------------
+      # Step 3: Call the Supabase Edge Function
+      # --------------------------------------------------------
+      - name: Invoke generate-contest Edge Function
+        id: invoke
+        shell: bash
+        env:
+          SUPABASE_FUNCTION_URL: ${{ secrets.SUPABASE_FUNCTION_URL }}
+          AUTOMATION_SECRET: ${{ secrets.AUTOMATION_SECRET }}
+        run: |
+          WEEK_START="${{ steps.date.outputs.week_start }}"
+          BODY='${{ steps.body.outputs.body }}'
+
+          echo "Calling generate-contest for week_start=$WEEK_START ..."
+
+          HTTP_STATUS=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            --max-time 300 \
+            -X POST "$SUPABASE_FUNCTION_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $AUTOMATION_SECRET" \
+            -d "$BODY")
+
+          echo "HTTP status: $HTTP_STATUS"
+
+          # Extract only non-sensitive fields for logging
+          CONTEST_ID=$(jq -r '.contest.id // empty'             /tmp/response.json 2>/dev/null || true)
+          CONTEST_TITLE=$(jq -r '.contest.title // empty'        /tmp/response.json 2>/dev/null || true)
+          CONTEST_STATUS=$(jq -r '.contest.status // empty'      /tmp/response.json 2>/dev/null || true)
+          TOTAL_QUESTIONS=$(jq -r '.summary.total_questions // empty' /tmp/response.json 2>/dev/null || true)
+          ERROR_CODE=$(jq -r '.error // empty'                   /tmp/response.json 2>/dev/null || true)
+          ERROR_MSG=$(jq -r '.message // empty'                  /tmp/response.json 2>/dev/null || true)
+
+          if [[ "$HTTP_STATUS" == "201" ]]; then
+            echo ""
+            echo "SUCCESS: Draft contest created."
+            echo "  Contest ID     : $CONTEST_ID"
+            echo "  Title          : $CONTEST_TITLE"
+            echo "  Status         : $CONTEST_STATUS"
+            echo "  Total questions: $TOTAL_QUESTIONS"
+            echo ""
+            echo "result=created" >> "$GITHUB_OUTPUT"
+
+          elif [[ "$HTTP_STATUS" == "409" ]]; then
+            echo ""
+            echo "SKIPPED: A contest for week_start=$WEEK_START already exists."
+            echo "  Error : $ERROR_CODE"
+            echo "  Detail: $ERROR_MSG"
+            echo ""
+            echo "result=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+
+          else
+            echo ""
+            echo "FAILED: Edge Function returned HTTP $HTTP_STATUS."
+            echo "  Error : $ERROR_CODE"
+            echo "  Detail: $ERROR_MSG"
+            echo ""
+            exit 1
+          fi
+
+      # --------------------------------------------------------
+      # Step 4: Write job summary (no secrets, no answer keys)
+      # --------------------------------------------------------
+      - name: Write job summary
+        if: always()
+        shell: bash
+        run: |
+          RESULT="${{ steps.invoke.outputs.result }}"
+          WEEK_START="${{ steps.date.outputs.week_start }}"
+
+          echo "## SJCEM Weekly Contest Generator" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Week start | \`$WEEK_START\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Trigger    | \`${{ github.event_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$RESULT" == "created" ]]; then
+            echo "| Result | ✅ Draft contest created |" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> Contest is in **draft** status. Log in to the admin dashboard to review questions and activate it manually." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$RESULT" == "skipped" ]]; then
+            echo "| Result | ⏭️ Skipped — contest already exists for this week |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Result | ❌ Failed — check the step logs for details |" >> "$GITHUB_STEP_SUMMARY"
+          fi
